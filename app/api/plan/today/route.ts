@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { db } from '@/lib/db'
+import { moduleTermine } from '@/lib/lms'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -125,10 +126,29 @@ export async function GET() {
     db.userMlmBusiness.findUnique({ where: { id: bizId }, select: { story: true, objectif: true } }),
     db.lmsModule.findFirst({ where: { position: 0 }, select: { id: true } }).catch(() => null),
   ])
+  // Un module est terminé quand ses leçons sont faites ET ses quiz réussis — deux
+  // tables distinctes. La règle vit dans lib/lms.ts pour n'exister qu'une fois.
   let mindsetDone = false
   if (mindsetModule) {
-    const p = await db.userLmsProgress.findFirst({ where: { userId, moduleId: mindsetModule.id }, select: { status: true } }).catch(() => null)
-    mindsetDone = p?.status === 'DONE'
+    const lecons = await db.lmsLesson.findMany({
+      where: { moduleId: mindsetModule.id }, select: { id: true, kind: true },
+    }).catch(() => [] as { id: string; kind: string }[])
+    if (lecons.length) {
+      const ids = lecons.map((l) => l.id)
+      const [faites, reussis] = await Promise.all([
+        db.userLessonProgress.findMany({
+          where: { userId, lessonId: { in: ids }, done: true }, select: { lessonId: true },
+        }).catch(() => []),
+        db.userQuizAttempt.findMany({
+          where: { userId, lessonId: { in: ids }, passed: true }, select: { lessonId: true },
+        }).catch(() => []),
+      ])
+      mindsetDone = moduleTermine(
+        lecons,
+        new Set(faites.map((p) => p.lessonId)),
+        new Set(reussis.map((a) => a.lessonId)),
+      )
+    }
   }
   const coaching = (user?.coaching && typeof user.coaching === 'object' && !Array.isArray(user.coaching)) ? (user.coaching as Record<string, unknown>) : {}
   const hasStory = typeof business?.story === 'string' && business.story.trim().length > 0
